@@ -5,7 +5,8 @@ const Assignment_4 = @import("Assignment_4");
 
 const Edge = struct {
     to: u32,
-    weight: u32
+    weight: f32,
+    name: []const u8,
 };
 
 const Node = struct {
@@ -21,101 +22,167 @@ const PQItem = struct {
     dist: f32,
 };
 
-fn lessThan(_: void, a: PQItem, b: PQItem) bool {
-    return a.dist < b.dist; // for min-heap
+fn lessThan(_: void, a: PQItem, b: PQItem) std.math.Order {
+    if (a.dist < b.dist) return .lt;
+    if (a.dist > b.dist) return .gt;
+    return .eq;
 }
 
 //-----------------------------
 // Name -> ID Helper
 //-----------------------------
-fn getOrCreateId(
-    name_map: *std.AutoHashMap([]const u8, u32),
+fn loadPlaceNames(
     allocator: std.mem.Allocator,
-    name: []const u8,
-    next_id: *u32,
-) !u32 {
-    if (name_map.get(name)) |id| {
-        return id;
+    io: Io,
+    filename: []const u8,
+    id_to_name: []?[]const u8,
+) !void {
+    var file = try Io.Dir.cwd().openFile(io, filename, .{});
+    defer file.close(io);
+
+    var reader_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &reader_buf);
+    const interface = &reader.interface;
+
+    while (true) {
+        const maybe_line = interface.takeDelimiter('\n') catch |err| return err;
+
+        if (maybe_line == null) break;
+
+        const line = maybe_line.?;
+
+        var it = std.mem.splitScalar(u8, line, ',');
+
+        const id_str = it.next() orelse continue;
+        const raw_name = it.next() orelse continue;
+        const name = std.mem.trim(u8, raw_name, " \r\n\t");
+
+        const id = try std.fmt.parseInt(u32, id_str, 10);
+
+        id_to_name[id] = try allocator.dupe(u8, name);
     }
+}
 
-    const owned = try allocator.dupe(u8, name);
+fn buildNameToIdMap(
+    allocator: std.mem.Allocator,
+    io: Io,
+    filename: []const u8,
+    name_to_id: *std.StringHashMap(std.ArrayList(u32)),
+) !void {
+    var file = try Io.Dir.cwd().openFile(io, filename, .{});
+    defer file.close(io);
 
-    const id = next_id.*;
-    next_id.* += 1;
+    var reader_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &reader_buf);
+    const interface = &reader.interface;
 
-    try name_map.put(owned, id);
-    return id;
+    while (true) {
+        const maybe_line = interface.takeDelimiter('\n') catch |err| return err;
+
+        if (maybe_line == null) break;
+
+        const line = maybe_line.?;
+
+        var it = std.mem.splitScalar(u8, line, ',');
+
+        const id_str = it.next() orelse continue;
+        const raw_name = it.next() orelse continue;
+        const name = std.mem.trim(u8, raw_name, " \r\n\t");
+
+        const id = try std.fmt.parseInt(u32, id_str, 10);
+
+        if(name_to_id.getPtr(name)) |list_ptr| {
+            try list_ptr.append(allocator, id);
+        } else {
+            var list = std.ArrayList(u32).empty;
+            try list.append(allocator, id);
+            const owned = try allocator.dupe(u8, name);
+            try name_to_id.put(owned, list);
+        }
+    }
 }
 
 //-----------------------------
 // First pass: count + map IDS
 //-----------------------------
-fn firstPass(
-    allocator: std.mem.Allocator,
-    filename: []const u8,
-    name_map: *std.AutoHashMap([]const u8, u32),
-) !u32 {
-    var file = try std.fs.cwd().openFile(filename, .{});
-    defer file.close();
+fn findMaxId(io: Io, filename: []const u8) !u32 {
+    var file = try Io.Dir.cwd().openFile(io, filename, .{});
+    defer file.close(io);
 
-    var reader = file.reader();
-    var buf: [1028]u8 = undefined;
+    var reader_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &reader_buf);
+    const interface = &reader.interface;
 
-    var next_id: u32 = 0;
+    var max_id: u32 = 0;
+    while (true) {
+        const maybe_line = interface.takeDelimiter('\n') catch |err| return err;
 
-    while(try reader.readUntilDelimiterOrEof(&buf, '\n')) |line| {
-        if(line.len == 0) continue;
+        if (maybe_line == null) break;
+
+        const line = maybe_line.?;
 
         var it = std.mem.splitScalar(u8, line, ',');
 
-        const from = it.next() orelse continue;
-        const to = it.next() orelse continue;
+        const a_str = it.next() orelse continue;
+        const b_str = it.next() orelse continue;
 
-        _ = try getOrCreateId(name_map, allocator, from, &next_id);
-        _ = try getOrCreateId(name_map, allocator, to, &next_id);
+        const a = try std.fmt.parseInt(u32, a_str, 10);
+        const b = try std.fmt.parseInt(u32, b_str, 10);
+
+        if (a > max_id) max_id = a;
+        if (b > max_id) max_id = b;
     }
 
-    return next_id;
+    return max_id;
 }
 
 //-----------------------------
 // Second pass: build graph
 //-----------------------------
-fn secondPass(
+fn buildGraph(
     allocator: std.mem.Allocator,
+    io: Io,
     filename: []const u8,
-    name_map: *std.AutoHashMap([]const u8, u32),
     graph: *Graph,
 ) !void {
-    var file = try std.fs.cwd().openFile(filename, .{});
-    defer file.close();
+    var file = try Io.Dir.cwd().openFile(io, filename, .{});
+    defer file.close(io);
 
-    var reader = file.reader();
-    var buf: [1028]u8 = undefined;
+    var reader_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &reader_buf);
+    const interface = &reader.interface;
 
-    while(try reader.readUntilDelimiterOrEof(&buf, '\n')) |line| {
-        if(line.len == 0) continue;
+    while (true) {
+        const maybe_line = interface.takeDelimiter('\n') catch |err| return err;
+
+        if (maybe_line == null) break;
+
+        const line = maybe_line.?;
 
         var it = std.mem.splitScalar(u8, line, ',');
 
-        const from_name = it.next() orelse continue;
-        const to_name = it.next() orelse continue;
+        const a_str = it.next() orelse continue;
+        const b_str = it.next() orelse continue;
         const weight_str = it.next() orelse continue;
+        const road_name_raw = it.next() orelse "";
+        const road_name = std.mem.trim(u8, road_name_raw, " \r\n\t");
 
+        const a = try std.fmt.parseInt(u32, a_str, 10);
+        const b = try std.fmt.parseInt(u32, b_str, 10);
         const weight = try std.fmt.parseFloat(f32, weight_str);
+        const owned_name = try allocator.dupe(u8, road_name);
 
-        const from_id = name_map.get(from_name).?;
-        const to_id = name_map.get(to_name).?;
-
-        try graph.nodes[from_id].edges.append(.{
-            .to = to_id,
+        try graph.nodes[a].edges.append(allocator, .{
+            .to = b,
             .weight = weight,
+            .name = owned_name,
         });
 
         // If undirected, also add reverse
-        try graph.nodes[to_id].edges.append(.{
-            .to = from_id,
+        try graph.nodes[b].edges.append(allocator, .{
+            .to = a,
             .weight = weight,
+            .name = owned_name,
         });
     }
 }
@@ -129,34 +196,36 @@ fn dijkstra(
     start: u32,
 ) !struct {
     dist: []f32,
-    prev: []?f32,
+    prev: []?u32,
 } {
     const n = graph.nodes.len;
 
     var dist = try allocator.alloc(f32, n);
     var prev = try allocator.alloc(?u32, n);
 
-    for(dist) |*d| d.* = std.math.inf(f32);
-    for(prev) |*p| p.* = null;
+    for (dist) |*d| d.* = std.math.inf(f32);
+    for (prev) |*p| p.* = null;
 
     dist[start] = 0;
 
-    var pq = std.PriorityQueue(PQItem, void, lessThan).init(allocator, {});
-    try pq.add(.{ .node = start, .dist = 0 });
+    var pq = std.PriorityQueue(PQItem, void, lessThan).initContext({});
+    defer pq.deinit(allocator);
 
-    while(pq.removeOrNull()) |item| {
+    try pq.push(allocator, .{ .node = start, .dist = 0 });
+
+    while (pq.pop()) |item| {
         const u = item.node;
 
-        if(item.dist > dist[u]) continue;
+        if (item.dist > dist[u]) continue;
 
-        for(graph.nodes[u].edges.items) |edge| {
+        for (graph.nodes[u].edges.items) |edge| {
             const alt = dist[u] + edge.weight;
 
-            if(alt < dist[edge.to]) {
+            if (alt < dist[edge.to]) {
                 dist[edge.to] = alt;
                 prev[edge.to] = u;
 
-                try pq.add(.{
+                try pq.push(allocator, .{
                     .node = edge.to,
                     .dist = alt,
                 });
@@ -167,6 +236,18 @@ fn dijkstra(
     return .{ .dist = dist, .prev = prev };
 }
 
+//---------------------------------------------
+// Helper function for searching for
+// minimum id (since there are duplicates)
+//---------------------------------------------
+fn pickMinId(list: std.ArrayList(u32)) u32 {
+    var min = list.items[0];
+    for (list.items[1..]) |id| {
+        if (id < min) min = id;
+    }
+    return min;
+}
+
 //-----------------------------
 // Path Reconstruction
 //-----------------------------
@@ -175,81 +256,152 @@ fn reconstructPath(
     prev: []?u32,
     target: u32,
 ) ![]u32 {
-    var path = std.ArrayList(u32).init(allocator);
+    var path: std.ArrayList(u32) = .empty;
 
     var current: ?u32 = target;
 
-    while(current) |c| {
-        try path.append(c);
+    while (current) |c| {
+        try path.append(allocator, c);
         current = prev[c];
     }
 
     std.mem.reverse(u32, path.items);
 
-    return path.toOwnedSlice();
+    return path.toOwnedSlice(allocator);
 }
 
 pub fn main(init: std.process.Init) !void {
+    const io = init.io;
     const allocator = init.arena.allocator();
 
-    // TODO: Change this to the ACTUAL filename
-    const filename = "graph.csv";
+    const road_file = "Road.txt";
+    const place_file = "Place.txt";
 
-    var name_map = std.AutoHashMap([]const u8, u32).init(allocator);
-
-    // First pass
-    const num_nodes = try firstPass(allocator, filename, &name_map);
-
-    std.debug.print("Nodes: {}\n", .{num_nodes});
+    // Find max ID
+    const max_id = try findMaxId(io, road_file);
 
     // Allocate graph
-    var nodes = try allocator.alloc(Node, num_nodes);
+    const nodes = try allocator.alloc(Node, max_id + 1);
 
-    for(nodes) |*n| {
+    for (nodes) |*n| {
         n.* = Node{
-            .edges = std.ArrayList(Edge).init(allocator),
+            .edges = .empty,
         };
     }
 
     var graph = Graph{ .nodes = nodes };
 
-    // Second pass
-    try secondPass(allocator, filename, &name_map, &graph);
+    // Build graph
+    try buildGraph(allocator, io, road_file, &graph);
 
-    // Reverse map
-    var id_to_name = try allocator.alloc([]const u8, num_nodes);
+    // ID -> name
+    const id_to_name = try allocator.alloc(?[]const u8, max_id + 1);
+    for (id_to_name) |*n| n.* = null; // Initialize array
 
-    var it = name_map.iterator();
-    while(it.next()) |entry| {
-        id_to_name[entry.value_ptr.*] = entry.key_ptr.*;
+    try loadPlaceNames(allocator, io, place_file, id_to_name);
+
+    // name -> ID
+    var name_to_id = std.StringHashMap(std.ArrayList(u32)).init(allocator);
+    try buildNameToIdMap(allocator, io, place_file, &name_to_id);
+
+    if (name_to_id.get("MIKALAMAZOO N")) |list| {
+        std.debug.print("Kalamazoo IDs: {any}\n", .{list.items});
+    }
+    if (name_to_id.get("MIANN ARBOR N")) |list| {
+        std.debug.print("Ann Arbor IDs: {any}\n", .{list.items});
     }
 
-    // Example query
-    const start_name = "A";
-    const end_name = "B";
+    // Input
+    var stdin_file = Io.File.stdin();
+    var stdin_buf: [1024]u8 = undefined;
+    var stdin = stdin_file.reader(io, &stdin_buf);
+    const interface = &stdin.interface;
 
-    const start = name_map.get(start_name) orelse {
-        std.debug.print("Start not found\n", .{});
+    std.debug.print("Enter the Source Name:\n", .{});
+    const maybe_start_name = interface.takeDelimiter('\n') catch |err| return err;
+    const start_name = try allocator.dupe(u8, std.mem.trim(u8, maybe_start_name.?, " \r\n\t"));
+
+    std.debug.print("Enter the Destination Name:\n", .{});
+    const maybe_end_name = interface.takeDelimiter('\n') catch |err| return err;
+    const end_name = try allocator.dupe(u8, std.mem.trim(u8, maybe_end_name.?, " \r\n\t"));
+
+    std.debug.print("START RAW: '{s}'\n", .{start_name});
+    const start_list = name_to_id.get(start_name) orelse {
+        std.debug.print("Start: {s} not found\n", .{start_name});
         return;
     };
 
-    const target = name_map.get(end_name) orelse {
-        std.debug.print("Target not found\n", .{});
+    std.debug.print("TARGET RAW: '{s}'\n", .{end_name});
+    const target_list = name_to_id.get(end_name) orelse {
+        std.debug.print("Target: {s} not found\n", .{end_name});
         return;
     };
+
+    // var it = name_to_id.iterator();
+    // while (it.next()) |e| {
+    //     std.debug.print("MAP KEY: '{s}'\n", .{e.key_ptr.*});
+    // }
+
+    const start = pickMinId(start_list);
+    const target = pickMinId(target_list);
+
+    std.debug.print(
+        "Searching from {}({s}) to {}({s})\n", .{
+            start,
+            if (id_to_name[start]) |n| n else "null",
+            target,
+            if (id_to_name[target]) |n| n else "null",
+        },
+    );
 
     // Run Dijkstra
     const result = try dijkstra(allocator, &graph, start);
 
-    std.debug.print("Distance: {}\n", .{ result.dist[target] });
+    std.debug.print("Distance: {}\n", .{result.dist[target]});
 
     // Path
     const path = try reconstructPath(allocator, result.prev, target);
 
-    std.debug.print("Path:\n", .{});
-    for(path) |id| {
-        std.debug.print("{s}\n", .{id_to_name[id]});
+    // Print path
+    var total: f32 = 0;
+
+    for (path, 0..) |node, i| {
+        if (i == 0) continue;
+
+        const prev = path[i - 1];
+
+        // find edge weight
+        for (graph.nodes[prev].edges.items) |edge| {
+            if (edge.to == node) {
+                total += edge.weight;
+
+                std.debug.print(
+                    "\t{}: {}({s}) -> {}({s}), {s}, {:.2} mi.\n",
+                    .{
+                        i,
+                        prev,
+                        if(id_to_name[prev]) |n| n else "null",
+                        node,
+                        if(id_to_name[node]) |n| n else "null",
+                        edge.name,
+                        edge.weight,
+                    },
+                );
+
+                break;
+            }
+        }
     }
+
+    std.debug.print(
+        "\nIt takes {:.2} miles from {}({s}) to {}({s}).\n", .{
+            total,
+            start,
+            if(id_to_name[start]) |n| n else "null",
+            target,
+            if(id_to_name[target]) |n| n else "null",
+        },
+    );
 }
 
 test "simple test" {
