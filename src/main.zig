@@ -283,6 +283,7 @@ pub fn main(init: std.process.Init) !void {
     // Allocate graph
     const nodes = try allocator.alloc(Node, max_id + 1);
 
+    // Initialize graph
     for (nodes) |*n| {
         n.* = Node{
             .edges = .empty,
@@ -304,12 +305,12 @@ pub fn main(init: std.process.Init) !void {
     var name_to_id = std.StringHashMap(std.ArrayList(u32)).init(allocator);
     try buildNameToIdMap(allocator, io, place_file, &name_to_id);
 
-    if (name_to_id.get("MIKALAMAZOO N")) |list| {
-        std.debug.print("Kalamazoo IDs: {any}\n", .{list.items});
-    }
-    if (name_to_id.get("MIANN ARBOR N")) |list| {
-        std.debug.print("Ann Arbor IDs: {any}\n", .{list.items});
-    }
+    // if (name_to_id.get("MIKALAMAZOO N")) |list| {
+    //     std.debug.print("Kalamazoo IDs: {any}\n", .{list.items});
+    // }
+    // if (name_to_id.get("MIANN ARBOR N")) |list| {
+    //     std.debug.print("Ann Arbor IDs: {any}\n", .{list.items});
+    // }
 
     // Input
     var stdin_file = Io.File.stdin();
